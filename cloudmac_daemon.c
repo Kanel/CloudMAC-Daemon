@@ -7,15 +7,63 @@
 #include <netinet/in.h>
 #include <netdb.h>
 #include <string.h>
+#include <signal.h>
+#include <sys/timeb.h>
 
 #define PORT    1999
 #define BUFFER_LENGTH  512
 #define SELECT_TIMEOUT_SECONDS 1
 #define ACK_INTERFACES 32
 #define FILE_NAME_BUFFER_LENGTH 100
+#define TRUE 1
+#define FALSE 0
+#define MAC_ADDRESS_LENGTH 19 // Includes null termianter
+
+const char * del_ack_interfaces = "iw dev ack%d del";
+const char * create_ack_interfaces = "iw phy phy0 interface add ack%d type managed"; 
+const char * ack_interface_operstate = "/sys/class/net/ack%d/operstate";
+const char * ack_interface_mac_address = "/sys/class/net/ack%d/phy80211/macaddress";
+const char * ack_interface_set_mac = "ifconfig ack%d hw ether %s";
+const char * ack_interface_activate = "ifconfig ack%d up";
+const char * ack_interface_deactivate = "ifconfig ack%d down";
 
 int serverfd;
 struct sockaddr_in serv_addr;
+int keepRunning;
+
+struct record {
+	char mac[MAC_ADDRESS_LENGTH];
+	unsigned long expires;
+};
+
+void cleanup()
+{
+	int  i;
+	char buffer[BUFFER_LENGTH];
+	
+	for (i = 0; i < ACK_INTERFACES; i++)
+	{
+		printf(del_ack_interfaces, i);
+		printf("\n");
+		snprintf(buffer, BUFFER_LENGTH, del_ack_interfaces, i);		
+		system(buffer);
+	}
+}
+
+void  INThandler(int sig)
+{
+	if (keepRunning == FALSE)
+	{
+		cleanup();
+		exit(0);
+	}
+	else
+	{
+		printf("Shutting down!\n");
+
+		keepRunning = FALSE;	
+	}
+}
 
 int setup_server(int port)
 {
@@ -39,11 +87,12 @@ int setup_server(int port)
 	return 0;
 }
 
-char * readfile(const char * filename)
+char * readfile(const char * filename, char * buffer, int buffer_length)
 {
 	char file_buffer[BUFFER_LENGTH];
 	char * content;
 	FILE * file = fopen(filename, "r");
+	int read_bytes;
 
 	if(file == NULL)
 	{
@@ -53,16 +102,52 @@ char * readfile(const char * filename)
 
 		return result;
 	}
-	fread(file_buffer, BUFFER_LENGTH, 1, file);
+	read_bytes = fread(buffer, 1, buffer_length, file);
+
 	fclose(file);
 
-	content = malloc(strlen(file_buffer) + 1);
+	// Remove trailing linebreaks. 
+	if (buffer[read_bytes - 2] == '\r')
+	{
+		buffer[read_bytes - 2] = 0;
+	}
+	else if (buffer[read_bytes - 1] == '\n')
+	{
+		buffer[read_bytes - 1] = 0;
+	}
+	else
+	{
+		buffer[read_bytes] = 0;
+	}
 
-	strcpy(content, file_buffer);
+	return buffer;
+}
 
-	content[strlen(file_buffer) - 2] = 0; // Remove trailing linebreaks
+unsigned long getEpochTime()
+{
+	struct timeb time;
 
-	return content;
+	ftime(&time);
+
+	return time.time * 1000 + time.millitm;
+}
+
+char * getOperstate(int i, char * buffer, int buffer_length)
+{
+	char mac_file[FILE_NAME_BUFFER_LENGTH];
+
+	snprintf(mac_file, FILE_NAME_BUFFER_LENGTH, ack_interface_operstate, i);
+	
+	return readfile(mac_file, buffer, buffer_length);
+}
+
+char * getMacAddress(int i, char * buffer, int buffer_length)
+{
+	char state_file[FILE_NAME_BUFFER_LENGTH];
+
+	snprintf(state_file, FILE_NAME_BUFFER_LENGTH, ack_interface_mac_address, i);
+	
+	return readfile(state_file, buffer, buffer_length);
 }
 
 int main()
@@ -70,11 +155,16 @@ int main()
 	int i;
 	int clientfd;
 	int client_len;
-	int interfaces[ACK_INTERFACES];
 	char buffer[BUFFER_LENGTH];
+	struct record records[ACK_INTERFACES];
 	struct sockaddr_in cli_addr;
 	struct timeval tv;
 	fd_set active_set, reference_set;
+	
+	keepRunning = TRUE;
+
+	signal(SIGINT, INThandler);	
+	memset(records, 0, sizeof(records));
 
 	printf("Setting up Server\n");
 	
@@ -82,21 +172,20 @@ int main()
 	{
 		printf("Bind Failed\n");
 		return -1;
-	}	
+	}
 
 	printf("Setting up Interfaces\n");
 	for (i = 0; i < ACK_INTERFACES; i++)
 	{
-		interfaces[i] = 0;
+		printf(del_ack_interfaces, i);
+		printf("\n");
+		snprintf(buffer, BUFFER_LENGTH, del_ack_interfaces, i);		
+		system(buffer);
 
-		printf("iw dev wlan0.%d del\n", i);
-		snprintf(buffer, BUFFER_LENGTH, "iw dev wlan0.%d del", i);		
+		printf(create_ack_interfaces, i);
+		printf("\n");
+		snprintf(buffer, BUFFER_LENGTH, create_ack_interfaces, i);		
 		system(buffer);
-		sleep(1);
-		printf("iw phy phy0 interface add wlan0.%d type managed", i);
-		snprintf(buffer, BUFFER_LENGTH, "iw phy phy0 interface add wlan0.%d type managed", i);		
-		system(buffer);
-		sleep(1);
 	}
 
 	printf("Address Bound\n");
@@ -106,7 +195,7 @@ int main()
 	FD_ZERO(&reference_set);
 	FD_SET(serverfd, &reference_set);
 
-	while (1)
+	while (keepRunning == TRUE)
 	{
 		tv.tv_sec = (long)SELECT_TIMEOUT_SECONDS;
 		tv.tv_usec = 0;
@@ -121,38 +210,124 @@ int main()
 			client_len = sizeof(cli_addr);
 			clientfd = accept(serverfd, (struct sockaddr *)&cli_addr, &client_len);
 			read_bytes = read(clientfd, buffer, BUFFER_LENGTH);
-			buffer[read_bytes] = 0;
-			message_length = strlen(buffer);		
+			buffer[read_bytes] = 0;		
 
 			if (read_bytes > 0)
 			{
-				if(buffer[message_length - 2] == '\r' || 
-				   buffer[message_length - 2] == '\n')
+				// Remove trailing linebreaks.
+				if (buffer[read_bytes - 2] == '\r')
 				{
-					buffer[message_length - 2] = '\0';
+					buffer[read_bytes - 2] = 0;
 				}
-				if(strcmp(buffer, "get") == 0)
+				else if (buffer[read_bytes - 1] == '\n')
+				{
+					buffer[read_bytes - 1] = 0;
+				}
+				else
+				{
+					buffer[read_bytes] = 0;
+				}
+
+				if (strncmp(buffer, "status", 7) == 0)
 				{
 					for (i = 0; i < ACK_INTERFACES; i++)
 					{
-						char state_file[FILE_NAME_BUFFER_LENGTH];
-						char mac_file[FILE_NAME_BUFFER_LENGTH];
-						char * wlan0state;
-						char * wlan0mac;
-						char result[BUFFER_LENGTH];
+						char state[BUFFER_LENGTH];
+						char mac[BUFFER_LENGTH];
+
+						getOperstate(i, state, BUFFER_LENGTH);
+						getMacAddress(i, mac, BUFFER_LENGTH);
 					
-						snprintf(state_file, FILE_NAME_BUFFER_LENGTH, "/sys/class/net/wlan0.%d/operstate", i);
-						snprintf(mac_file, FILE_NAME_BUFFER_LENGTH, "/sys/class/net/wlan0.%d/phy80211/macaddress", i);
+						snprintf(buffer, BUFFER_LENGTH, "ack%d: %s %s %lu\n", i, state, mac, records[i].expires);
 					
-						wlan0state = readfile(state_file);
-						wlan0mac = readfile(mac_file);
-					
-						snprintf(result, BUFFER_LENGTH, "wlan0.%d: %s %s\n", i, wlan0state, wlan0mac);
-						free(wlan0state);
-						free(wlan0mac);
-					
-						write(clientfd, result, strlen(result) + 1);
+						write(clientfd, buffer, strlen(buffer) + 1);
 					}
+				}
+				else if (strncmp(buffer, "records", 7) == 0)
+				{
+					for (i = 0; i < ACK_INTERFACES; i++)
+					{
+						snprintf(buffer, BUFFER_LENGTH, "record-%d: %s %lu\n", i, records[i].mac, records[i].expires);
+						printf("--%s--\n", records[i].mac);
+						write(clientfd, buffer, strlen(buffer) + 1);
+					}
+				}
+				else if (strncmp(buffer, "lease", 5) == 0)
+				{
+					int empty_slot = -1;
+					int found_slot = -1;
+					char mac[MAC_ADDRESS_LENGTH];
+					char interface_state[BUFFER_LENGTH];
+					char interface_mac[BUFFER_LENGTH];
+					unsigned int timeout;
+					unsigned long now = getEpochTime();				 
+		
+					sscanf(buffer, "lease %s %u", mac, &timeout);
+					
+					for (i = 0; i < ACK_INTERFACES; i++)
+					{
+						if (strncmp(mac, records[i].mac, 19) == 0)
+						{
+							found_slot = i;
+
+							break;
+						}
+						else if (records[i].expires == 0)
+						{
+							empty_slot = i;
+						}
+					}
+					if (found_slot != -1)
+					{
+						records[found_slot].expires = getEpochTime() + timeout;
+
+						printf("%lu: Lease for %s extended, expires %lu\n", now, records[found_slot].mac, records[found_slot].expires);
+
+						// Write interface state to client.
+						getOperstate(found_slot, interface_state, BUFFER_LENGTH);
+						getMacAddress(found_slot, interface_mac, BUFFER_LENGTH);
+					
+						snprintf(buffer, BUFFER_LENGTH, "ack%d: %s %s %lu\n", found_slot, interface_state, interface_mac, records[i].expires);
+						write(clientfd, buffer, strlen(buffer) + 1);
+					}
+					else if (empty_slot != -1)
+					{
+						strncpy(records[empty_slot].mac, mac, MAC_ADDRESS_LENGTH);
+
+						records[empty_slot].mac[MAC_ADDRESS_LENGTH - 1] = 0; // Make sure it is null terminated.
+						records[empty_slot].expires = getEpochTime() + timeout;
+
+						printf("%lu: Added lease for %s expires %lu\n", now, records[empty_slot].mac, records[empty_slot].expires);
+
+						// Turn off the interface.
+						snprintf(buffer, BUFFER_LENGTH, ack_interface_deactivate, empty_slot);
+						system(buffer);
+
+						// Set MAC adress.
+						snprintf(buffer, BUFFER_LENGTH, ack_interface_set_mac, empty_slot, records[empty_slot].mac);
+						system(buffer);
+
+						// Turn on interface.
+						snprintf(buffer, BUFFER_LENGTH, ack_interface_activate, empty_slot);
+						system(buffer);
+
+						// Write interface state to client.
+						getOperstate(empty_slot, interface_state, BUFFER_LENGTH);
+						getMacAddress(empty_slot, interface_mac, BUFFER_LENGTH);
+					
+						snprintf(buffer, BUFFER_LENGTH, "ack%d: %s %s %lu\n", empty_slot, interface_state, interface_mac, records[i].expires);
+						write(clientfd, buffer, strlen(buffer) + 1);
+					}
+					else
+					{
+						snprintf(buffer, BUFFER_LENGTH, "No available interface\n");
+						write(clientfd, buffer, strlen(buffer) + 1);
+					}
+				}
+				else
+				{
+					snprintf(buffer, BUFFER_LENGTH, "Unknown Command\n");
+					write(clientfd, buffer, strlen(buffer) + 1);
 				}
 				
 			}
@@ -160,7 +335,20 @@ int main()
 		}
 		else
 		{
-			printf("Nothing here!\n");
+			unsigned long now = getEpochTime();
+
+			for (i = 0; i < ACK_INTERFACES; i++)
+			{
+				if (records[i].expires != 0 && records[i].expires < now)
+				{
+					printf("%lu: Lease for %s expired\n", now, records[i].mac);
+					memset(&records[i], 0, sizeof(records[i]));
+				}
+			}
 		}
 	}
+	printf("\nShutting down!\n");		
+	cleanup();
+
+	return 0;
 }
