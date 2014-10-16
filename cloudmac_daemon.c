@@ -306,8 +306,6 @@ int main()
 						snprintf(buffer, BUFFER_LENGTH, "ack%d: %s %s %lu\n", found_slot, state, mac, records[found_slot].expires);
 
 						write(clientfd, buffer, strlen(buffer) + 1);
-
-						break;
 					}
 					else
 					{
