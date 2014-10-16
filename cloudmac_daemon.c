@@ -248,7 +248,6 @@ int main()
 					for (i = 0; i < ACK_INTERFACES; i++)
 					{
 						snprintf(buffer, BUFFER_LENGTH, "record-%d: %s %lu\n", i, records[i].mac, records[i].expires);
-						printf("--%s--\n", records[i].mac);
 						write(clientfd, buffer, strlen(buffer) + 1);
 					}
 				}
@@ -309,7 +308,11 @@ int main()
 
 						// Turn on interface.
 						snprintf(buffer, BUFFER_LENGTH, ack_interface_activate, empty_slot);
-						system(buffer);
+						
+						while (system(buffer) < 0)
+						{
+							usleep(50);
+						}
 
 						// Write interface state to client.
 						getOperstate(empty_slot, interface_state, BUFFER_LENGTH);
