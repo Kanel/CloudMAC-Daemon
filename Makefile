@@ -9,7 +9,7 @@ wtp:
 	export ARCH=arm &&\
 	export LINUX="$$KLIB" &&\
 	export STAGING_DIR="" &&\
-	$$BIN$$CC -c  cloudmac_daemon.c -o cloudmac_daemon
+	$$BIN$$CC cloudmac_daemon.c -o cloudmac_daemon
 	chmod +x cloudmac_daemon
 
 all:

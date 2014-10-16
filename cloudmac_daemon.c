@@ -18,11 +18,13 @@
 #define TRUE 1
 #define FALSE 0
 #define MAC_ADDRESS_LENGTH 19 // Includes null termianter
+#define MAC_SCANF "%18s"      //
 
 const char * del_ack_interfaces = "iw dev ack%d del";
 const char * create_ack_interfaces = "iw phy phy0 interface add ack%d type managed"; 
 const char * ack_interface_operstate = "/sys/class/net/ack%d/operstate";
-const char * ack_interface_mac_address = "/sys/class/net/ack%d/phy80211/macaddress";
+const char * ack_interface_flags = "/sys/class/net/ack%d/flags";
+const char * ack_interface_mac_address = "/sys/class/net/ack%d/address";
 const char * ack_interface_set_mac = "ifconfig ack%d hw ether %s";
 const char * ack_interface_activate = "ifconfig ack%d up";
 const char * ack_interface_deactivate = "ifconfig ack%d down";
@@ -132,6 +134,7 @@ unsigned long getEpochTime()
 	return time.time * 1000 + time.millitm;
 }
 
+// Seems to not work on CloudMAC WTPs allways reported "down" or "unknown".
 char * getOperstate(int i, char * buffer, int buffer_length)
 {
 	char mac_file[FILE_NAME_BUFFER_LENGTH];
@@ -139,6 +142,27 @@ char * getOperstate(int i, char * buffer, int buffer_length)
 	snprintf(mac_file, FILE_NAME_BUFFER_LENGTH, ack_interface_operstate, i);
 	
 	return readfile(mac_file, buffer, buffer_length);
+}
+
+char * getState(int i, char * buffer, int buffer_length)
+{
+	int flags;
+	char mac_file[FILE_NAME_BUFFER_LENGTH];
+
+	snprintf(mac_file, FILE_NAME_BUFFER_LENGTH, ack_interface_flags, i);
+	readfile(mac_file, buffer, buffer_length);
+	sscanf(buffer, "%x", &flags);
+	printf("%d\n", flags);
+	// The elast significant bit indicates if the interface is up.
+	if ((flags & 0x1) == 0x1)
+	{
+		snprintf(buffer, buffer_length, "up");
+	}
+	else
+	{
+		snprintf(buffer, buffer_length, "down");
+	}
+	return buffer;
 }
 
 char * getMacAddress(int i, char * buffer, int buffer_length)
@@ -228,14 +252,77 @@ int main()
 					buffer[read_bytes] = 0;
 				}
 
-				if (strncmp(buffer, "status", 7) == 0)
+				// Commands.
+				if (strncmp(buffer, "status index", 12) == 0)
+				{
+					unsigned int slot;
+					char mac[MAC_ADDRESS_LENGTH];
+
+					sscanf(buffer, "status index %u", &slot);
+
+					if (0 <= slot && slot < ACK_INTERFACES)
+					{
+						char state[BUFFER_LENGTH];
+						char mac[BUFFER_LENGTH];
+
+						getState(slot, state, BUFFER_LENGTH);
+						getMacAddress(slot, mac, BUFFER_LENGTH);
+
+						snprintf(buffer, BUFFER_LENGTH, "ack%d: %s %s %lu\n", slot, state, mac, records[slot].expires);
+
+						write(clientfd, buffer, strlen(buffer) + 1);
+					}
+					else
+					{
+						snprintf(buffer, BUFFER_LENGTH, "Index out of bounds\n");
+						write(clientfd, buffer, strlen(buffer) + 1);
+					}
+				}
+				else if (strncmp(buffer, "status mac", 10) == 0)
+				{
+					int found_slot = -1;
+					char mac[MAC_ADDRESS_LENGTH];
+
+					//snprintf(sad, bah, formatting_string, MAC_ADDRESS_LENGTH - 1);
+					sscanf(buffer, "status mac " MAC_SCANF, mac);
+
+					for (i = 0; i < ACK_INTERFACES; i++)
+					{
+						if (strncmp(mac, records[i].mac, 19) == 0)
+						{
+							found_slot = i;
+						
+							break;
+						}
+					}
+					if (found_slot != -1)
+					{
+						char state[BUFFER_LENGTH];
+						char mac[BUFFER_LENGTH];
+
+						getState(found_slot, state, BUFFER_LENGTH);
+						getMacAddress(found_slot, mac, BUFFER_LENGTH);
+
+						snprintf(buffer, BUFFER_LENGTH, "ack%d: %s %s %lu\n", found_slot, state, mac, records[found_slot].expires);
+
+						write(clientfd, buffer, strlen(buffer) + 1);
+
+						break;
+					}
+					else
+					{
+						snprintf(buffer, BUFFER_LENGTH, "Lease not found\n");
+						write(clientfd, buffer, strlen(buffer) + 1);
+					}
+				}
+				else if (strncmp(buffer, "status", 8) == 0)
 				{
 					for (i = 0; i < ACK_INTERFACES; i++)
 					{
 						char state[BUFFER_LENGTH];
 						char mac[BUFFER_LENGTH];
 
-						getOperstate(i, state, BUFFER_LENGTH);
+						getState(i, state, BUFFER_LENGTH);
 						getMacAddress(i, mac, BUFFER_LENGTH);
 					
 						snprintf(buffer, BUFFER_LENGTH, "ack%d: %s %s %lu\n", i, state, mac, records[i].expires);
@@ -261,7 +348,7 @@ int main()
 					unsigned int timeout;
 					unsigned long now = getEpochTime();				 
 		
-					sscanf(buffer, "lease %s %u", mac, &timeout);
+					sscanf(buffer, "lease " MAC_SCANF " %u", mac, &timeout);					
 					
 					for (i = 0; i < ACK_INTERFACES; i++)
 					{
@@ -283,7 +370,7 @@ int main()
 						printf("%lu: Lease for %s extended, expires %lu\n", now, records[found_slot].mac, records[found_slot].expires);
 
 						// Write interface state to client.
-						getOperstate(found_slot, interface_state, BUFFER_LENGTH);
+						getState(found_slot, interface_state, BUFFER_LENGTH);
 						getMacAddress(found_slot, interface_mac, BUFFER_LENGTH);
 					
 						snprintf(buffer, BUFFER_LENGTH, "ack%d: %s %s %lu\n", found_slot, interface_state, interface_mac, records[i].expires);
@@ -309,13 +396,14 @@ int main()
 						// Turn on interface.
 						snprintf(buffer, BUFFER_LENGTH, ack_interface_activate, empty_slot);
 						
-						while (system(buffer) < 0)
+						// Try until the interface is ready.
+						while(system(buffer) != 0)
 						{
 							usleep(50);
 						}
 
 						// Write interface state to client.
-						getOperstate(empty_slot, interface_state, BUFFER_LENGTH);
+						getState(empty_slot, interface_state, BUFFER_LENGTH);
 						getMacAddress(empty_slot, interface_mac, BUFFER_LENGTH);
 					
 						snprintf(buffer, BUFFER_LENGTH, "ack%d: %s %s %lu\n", empty_slot, interface_state, interface_mac, records[i].expires);
@@ -338,6 +426,7 @@ int main()
 		}
 		else
 		{
+			// Cleanup cycle.
 			unsigned long now = getEpochTime();
 
 			for (i = 0; i < ACK_INTERFACES; i++)
@@ -346,11 +435,15 @@ int main()
 				{
 					printf("%lu: Lease for %s expired\n", now, records[i].mac);
 					memset(&records[i], 0, sizeof(records[i]));
+
+					// Turn off the interface.
+					snprintf(buffer, BUFFER_LENGTH, ack_interface_deactivate, i);
+					system(buffer);
 				}
 			}
 		}
 	}
-	printf("\nShutting down!\n");		
+	printf("\nShutting down!\n");
 	cleanup();
 
 	return 0;
