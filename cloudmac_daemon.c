@@ -9,6 +9,12 @@
 #include <string.h>
 #include <signal.h>
 #include <sys/timeb.h>
+#include <arpa/inet.h>
+#include <linux/if_packet.h>
+#include <sys/ioctl.h>
+#include <net/if.h>
+#include <netinet/ether.h>
+#include <stdint.h>
 
 #define PORT    1999
 #define BUFFER_LENGTH  512
@@ -20,6 +26,132 @@
 #define MAC_ADDRESS_LENGTH 19 // Includes null termianter
 #define MAC_SCANF "%18s"      //
 
+/* Announce Stuff */
+#define IDLE_ANNOUNCE_TIME 1000000
+#define CLOUDMAC_ETHER_TYPE 0x1337
+#define DEFAULT_CONFIG_INTERFACE "eth1"
+#define DEFAULT_SEND_INTERFACE "eth0"
+#define DESTINATION_MAC_1 255
+#define DESTINATION_MAC_2 255
+#define DESTINATION_MAC_3 255
+#define DESTINATION_MAC_4 255
+#define DESTINATION_MAC_5 255
+#define DESTINATION_MAC_6 255
+
+struct ethernet_packet
+{
+	struct ether_header header;
+	uint8_t payload[16];
+};
+
+struct announcement_config
+{
+	struct ethernet_packet packet;
+	struct sockaddr_ll socket_address;
+	int socket;
+	char config_interface_name[IFNAMSIZ];
+};
+
+int init_announce(char * send_interface_name, char * config_interface_name, struct announcement_config * config)
+{
+	struct ifreq interface_idx;
+	struct ifreq interface_mac;	
+	
+	memset(config, 0, sizeof(struct announcement_config));
+	strncpy(config->config_interface_name, config_interface_name, IFNAMSIZ);
+	
+	/* Open socket. */	
+	if ((config->socket = socket(AF_PACKET, SOCK_RAW, SOCK_RAW)) == -1)
+	{
+		perror("socket");
+		
+		return -1;
+	}
+	
+	/* Get interface index to send the packets on. */
+	memset(&interface_idx, 0, sizeof(struct ifreq));
+	strncpy(interface_idx.ifr_name, send_interface_name, IFNAMSIZ - 1);
+	
+	if (ioctl(config->socket, SIOCGIFINDEX, &interface_idx) < 0)
+	{
+	    perror("SIOCGIFINDEX");		
+		
+		return -2;
+	}
+		
+	/* Get the MAC address to send the packets on. */
+	memset(&interface_mac, 0, sizeof(struct ifreq));
+	strncpy(interface_mac.ifr_name, send_interface_name, IFNAMSIZ - 1);
+	
+	if (ioctl(config->socket, SIOCGIFHWADDR, &interface_mac) < 0)
+	{
+	    perror("SIOCGIFHWADDR");
+		
+		return -3;
+	}
+	
+	/* Construct the static component of the packet. */	
+	config->packet.header.ether_dhost[0] = DESTINATION_MAC_1;
+	config->packet.header.ether_dhost[1] = DESTINATION_MAC_2;
+	config->packet.header.ether_dhost[2] = DESTINATION_MAC_3;
+	config->packet.header.ether_dhost[3] = DESTINATION_MAC_4;
+	config->packet.header.ether_dhost[4] = DESTINATION_MAC_5;
+	config->packet.header.ether_dhost[5] = DESTINATION_MAC_6;
+	config->packet.header.ether_shost[0] = ((uint8_t *)&interface_mac.ifr_hwaddr.sa_data)[0];
+	config->packet.header.ether_shost[1] = ((uint8_t *)&interface_mac.ifr_hwaddr.sa_data)[1];
+	config->packet.header.ether_shost[2] = ((uint8_t *)&interface_mac.ifr_hwaddr.sa_data)[2];
+	config->packet.header.ether_shost[3] = ((uint8_t *)&interface_mac.ifr_hwaddr.sa_data)[3];
+	config->packet.header.ether_shost[4] = ((uint8_t *)&interface_mac.ifr_hwaddr.sa_data)[4];
+	config->packet.header.ether_shost[5] = ((uint8_t *)&interface_mac.ifr_hwaddr.sa_data)[5];
+	config->packet.header.ether_type = htons(CLOUDMAC_ETHER_TYPE);
+	
+	/* configure socket address. */
+	memset(&config->socket_address, 0, sizeof(struct sockaddr_ll));
+
+	config->socket_address.sll_addr[0] = DESTINATION_MAC_1;
+	config->socket_address.sll_addr[1] = DESTINATION_MAC_2;
+	config->socket_address.sll_addr[2] = DESTINATION_MAC_3;
+	config->socket_address.sll_addr[3] = DESTINATION_MAC_4;
+	config->socket_address.sll_addr[4] = DESTINATION_MAC_5;
+	config->socket_address.sll_addr[5] = DESTINATION_MAC_6;
+	config->socket_address.sll_halen = ETH_ALEN;
+	config->socket_address.sll_ifindex = interface_idx.ifr_ifindex;
+	
+	return 0;
+}
+
+int announce(struct announcement_config * config)
+{
+	char * ip_buffer;
+	struct ifreq interface_ip;
+	
+	/* Get the IP address for the configuration interface. */
+	memset(&interface_ip, 0, sizeof(struct ifreq));
+	strncpy(interface_ip.ifr_name, config->config_interface_name, IFNAMSIZ - 1);
+	
+	interface_ip.ifr_addr.sa_family = AF_INET;
+	
+	if (ioctl(config->socket, SIOCGIFADDR, &interface_ip) < 0)
+	{
+		perror("SIOCGIFADDR");
+		
+		return -1;
+	}
+	
+	/* Set packet payload. */
+	ip_buffer = inet_ntoa(((struct sockaddr_in *)&interface_ip.ifr_addr)->sin_addr);
+	
+	strncpy(config->packet.payload, ip_buffer, sizeof(*config->packet.payload));
+
+	/* Send packet */
+	if (sendto(config->socket, &config->packet, sizeof(config->packet), 0, (struct sockaddr*)&config->socket_address, sizeof(struct sockaddr_ll)) < 0)
+	{
+		perror("SENDTO");
+	}	
+	return 0;
+}
+
+/* Other Stuff */
 const char * del_ack_interfaces = "iw dev ack%d del";
 const char * create_ack_interfaces = "iw phy phy0 interface add ack%d type managed"; 
 const char * ack_interface_operstate = "/sys/class/net/ack%d/operstate";
@@ -180,16 +312,29 @@ int main()
 	int clientfd;
 	int client_len;
 	char buffer[BUFFER_LENGTH];
+	unsigned long announce_expires = 0;
 	struct record records[ACK_INTERFACES];
 	struct sockaddr_in cli_addr;
 	struct timeval tv;
 	fd_set active_set, reference_set;
-	
+	struct announcement_config config;
+
 	keepRunning = TRUE;
 
 	signal(SIGINT, INThandler);	
 	memset(records, 0, sizeof(records));
 
+	// Announce configuration.
+	printf("Initializing Announce Configuration\n");
+	
+	if (init_announce(DEFAULT_SEND_INTERFACE, DEFAULT_CONFIG_INTERFACE, &config) < 0)
+	{
+		printf("Initialization failed\n");
+		
+		return -1;
+	}
+	
+	// Initialize listening socket.
 	printf("Setting up Server\n");
 	
 	if (setup_server(PORT) != 0)
@@ -214,7 +359,7 @@ int main()
 
 	printf("Address Bound\n");
 	printf("Listening for connections\n");
-	listen(serverfd, 1);
+	listen(serverfd, 10);
 
 	FD_ZERO(&reference_set);
 	FD_SET(serverfd, &reference_set);
@@ -226,6 +371,7 @@ int main()
 
 		active_set = reference_set;
 		
+		// Command cycle.
 		if (select(serverfd + 1, &active_set, (fd_set *)0, (fd_set *)0, &tv) > 0)
 		{
 			int message_length;
@@ -422,24 +568,30 @@ int main()
 			}
 			close(clientfd);
 		}
-		else
+		// Cleanup cycle.
+		unsigned long now = getEpochTime();
+
+		for (i = 0; i < ACK_INTERFACES; i++)
 		{
-			// Cleanup cycle.
-			unsigned long now = getEpochTime();
-
-			for (i = 0; i < ACK_INTERFACES; i++)
+			if (records[i].expires != 0 && records[i].expires < now)
 			{
-				if (records[i].expires != 0 && records[i].expires < now)
-				{
-					printf("%lu: Lease for %s expired\n", now, records[i].mac);
-					memset(&records[i], 0, sizeof(records[i]));
+				printf("%lu: Lease for %s expired\n", now, records[i].mac);
+				memset(&records[i], 0, sizeof(records[i]));
 
-					// Turn off the interface.
-					snprintf(buffer, BUFFER_LENGTH, ack_interface_deactivate, i);
-					system(buffer);
-				}
+				// Turn off the interface.
+				snprintf(buffer, BUFFER_LENGTH, ack_interface_deactivate, i);
+				system(buffer);
 			}
 		}
+		// Announce cycle.
+		if (announce_expires < now)
+		{
+			announce_expires = now + IDLE_ANNOUNCE_TIME;
+
+			printf("Announcing\n");
+			announce(&config);
+		}
+		
 	}
 	printf("\nShutting down!\n");
 	cleanup();
