@@ -27,7 +27,7 @@
 #define MAC_SCANF "%18s"      //
 
 /* Announce Stuff */
-#define IDLE_ANNOUNCE_TIME 1000000
+#define IDLE_ANNOUNCE_TIME 1000
 #define CLOUDMAC_ETHER_TYPE 0x1337
 #define DEFAULT_CONFIG_INTERFACE "eth1"
 #define DEFAULT_SEND_INTERFACE "eth0"
@@ -37,6 +37,12 @@
 #define DESTINATION_MAC_4 255
 #define DESTINATION_MAC_5 255
 #define DESTINATION_MAC_6 255
+#define SOURCE_MAC_1 255
+#define SOURCE_MAC_2 255
+#define SOURCE_MAC_3 255
+#define SOURCE_MAC_4 255
+#define SOURCE_MAC_5 255
+#define SOURCE_MAC_6 255
 
 struct ethernet_packet
 {
@@ -97,12 +103,12 @@ int init_announce(char * send_interface_name, char * config_interface_name, stru
 	config->packet.header.ether_dhost[3] = DESTINATION_MAC_4;
 	config->packet.header.ether_dhost[4] = DESTINATION_MAC_5;
 	config->packet.header.ether_dhost[5] = DESTINATION_MAC_6;
-	config->packet.header.ether_shost[0] = ((uint8_t *)&interface_mac.ifr_hwaddr.sa_data)[0];
-	config->packet.header.ether_shost[1] = ((uint8_t *)&interface_mac.ifr_hwaddr.sa_data)[1];
-	config->packet.header.ether_shost[2] = ((uint8_t *)&interface_mac.ifr_hwaddr.sa_data)[2];
-	config->packet.header.ether_shost[3] = ((uint8_t *)&interface_mac.ifr_hwaddr.sa_data)[3];
-	config->packet.header.ether_shost[4] = ((uint8_t *)&interface_mac.ifr_hwaddr.sa_data)[4];
-	config->packet.header.ether_shost[5] = ((uint8_t *)&interface_mac.ifr_hwaddr.sa_data)[5];
+	config->packet.header.ether_shost[0] = SOURCE_MAC_1;
+	config->packet.header.ether_shost[1] = SOURCE_MAC_2;
+	config->packet.header.ether_shost[2] = SOURCE_MAC_3;
+	config->packet.header.ether_shost[3] = SOURCE_MAC_4;
+	config->packet.header.ether_shost[4] = SOURCE_MAC_5;
+	config->packet.header.ether_shost[5] = SOURCE_MAC_6;
 	config->packet.header.ether_type = htons(CLOUDMAC_ETHER_TYPE);
 	
 	/* configure socket address. */
@@ -141,10 +147,11 @@ int announce(struct announcement_config * config)
 	/* Set packet payload. */
 	ip_buffer = inet_ntoa(((struct sockaddr_in *)&interface_ip.ifr_addr)->sin_addr);
 	
-	strncpy(config->packet.payload, ip_buffer, sizeof(*config->packet.payload));
+	memset(config->packet.payload, 0, sizeof(config->packet.payload));
+	strncpy(config->packet.payload, ip_buffer, strlen(ip_buffer));
 
 	/* Send packet */
-	if (sendto(config->socket, &config->packet, sizeof(config->packet), 0, (struct sockaddr*)&config->socket_address, sizeof(struct sockaddr_ll)) < 0)
+	if (sendto(config->socket, &config->packet, 30, 0, (struct sockaddr*)&config->socket_address, sizeof(struct sockaddr_ll)) < 0)
 	{
 		perror("SENDTO");
 	}	
