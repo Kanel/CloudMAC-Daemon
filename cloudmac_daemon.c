@@ -292,7 +292,8 @@ char * getState(int i, char * buffer, int buffer_length)
 	readfile(mac_file, buffer, buffer_length);
 	sscanf(buffer, "%x", &flags);
 	printf("%d\n", flags);
-	// The elast significant bit indicates if the interface is up.
+
+	// The least significant bit indicates if the interface is up.
 	if ((flags & 0x1) == 0x1)
 	{
 		snprintf(buffer, buffer_length, "up");
@@ -436,7 +437,6 @@ int main()
 					int found_slot = -1;
 					char mac[MAC_ADDRESS_LENGTH];
 
-					//snprintf(sad, bah, formatting_string, MAC_ADDRESS_LENGTH - 1);
 					sscanf(buffer, "status mac " MAC_SCANF, mac);
 
 					for (i = 0; i < ACK_INTERFACES; i++)
@@ -563,6 +563,51 @@ int main()
 					else
 					{
 						snprintf(buffer, BUFFER_LENGTH, "No available interface\n");
+						write(clientfd, buffer, strlen(buffer) + 1);
+					}
+				}
+				else if (strncmp(buffer, "stop", 4) == 0)
+				{
+					int empty_slot = -1;
+					int found_slot = -1;
+					char mac[MAC_ADDRESS_LENGTH];
+					char interface_state[BUFFER_LENGTH];
+					char interface_mac[BUFFER_LENGTH];	
+					unsigned long now = getEpochTime();			 
+		
+					sscanf(buffer, "stop " MAC_SCANF, mac);					
+					
+					for (i = 0; i < ACK_INTERFACES; i++)
+					{
+						if (strncmp(mac, records[i].mac, 19) == 0)
+						{
+							found_slot = i;
+
+							break;
+						}
+						else if (records[i].expires == 0)
+						{
+							empty_slot = i;
+						}
+					}
+					if (found_slot != -1)
+					{						
+						// Turn off the interface.
+						snprintf(buffer, BUFFER_LENGTH, ack_interface_deactivate, found_slot);
+						system(buffer);
+
+						printf("%lu: Lease for %s stopped\n", now, records[found_slot].mac);
+
+						// Write interface state to client.
+						getState(found_slot, interface_state, BUFFER_LENGTH);
+						getMacAddress(found_slot, interface_mac, BUFFER_LENGTH);
+					
+						snprintf(buffer, BUFFER_LENGTH, "ack%d: %s %s %lu\n", found_slot, interface_state, interface_mac, records[i].expires);
+						write(clientfd, buffer, strlen(buffer) + 1);
+					}
+					else
+					{
+						snprintf(buffer, BUFFER_LENGTH, "No such lease\n");
 						write(clientfd, buffer, strlen(buffer) + 1);
 					}
 				}
