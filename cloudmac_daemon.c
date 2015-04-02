@@ -591,7 +591,10 @@ int main()
 						}
 					}
 					if (found_slot != -1)
-					{						
+					{	
+						// Reset configuration.
+						memset(&records[i], 0, sizeof(records[i]));
+				
 						// Turn off the interface.
 						snprintf(buffer, BUFFER_LENGTH, ack_interface_deactivate, found_slot);
 						system(buffer);
@@ -627,12 +630,14 @@ int main()
 		{
 			if (records[i].expires != 0 && records[i].expires < now)
 			{
-				printf("%lu: Lease for %s expired\n", now, records[i].mac);
+				// Reset configuration.
 				memset(&records[i], 0, sizeof(records[i]));
 
 				// Turn off the interface.
 				snprintf(buffer, BUFFER_LENGTH, ack_interface_deactivate, i);
 				system(buffer);
+				
+				printf("%lu: Lease for %s expired\n", now, records[i].mac);
 			}
 		}
 		// Announce cycle.
